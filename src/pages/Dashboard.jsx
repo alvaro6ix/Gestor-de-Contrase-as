@@ -99,7 +99,6 @@ const Dashboard = () => {
   const [refreshing, setRefreshing] = useState(false); // soft top-bar indicator
   const [lightboxImage, setLightboxImage] = useState(null);
   const [mobileGroupsOpen, setMobileGroupsOpen] = useState(false);
-  const fetchInFlight = useRef(false);
 
   // Selection mode (bulk move)
   const [selectionMode, setSelectionMode] = useState(false);
@@ -122,10 +121,13 @@ const Dashboard = () => {
   // ── Data loaders ────────────────────────────────────────────────────────────
   // initial=true muestra spinner full-screen. silent=true no muestra nada.
   // Por defecto: indicador "refreshing" sutil sin blanquear la cuadrícula.
+  // Usamos un token monotónico para descartar respuestas obsoletas en lugar de
+  // bloquear nuevas requests (que es lo que rompía los refetches después de
+  // guardar una categoría).
+  const fetchToken = useRef(0);
   const fetchAll = useCallback(async ({ initial = false, silent = false } = {}) => {
     if (!user) return;
-    if (fetchInFlight.current) return; // evita carreras
-    fetchInFlight.current = true;
+    const myToken = ++fetchToken.current;
 
     if (initial) setLoading(true);
     else if (!silent) setRefreshing(true);
@@ -137,23 +139,25 @@ const Dashboard = () => {
         supabase.from('categories').select('*').eq('user_id', user.id).order('name'),
         supabase.from('password_categories').select('*').eq('user_id', user.id),
       ]);
+      // Solo aplicar si seguimos siendo el fetch más reciente
+      if (myToken !== fetchToken.current) return;
       setPasswords(pRes.data || []);
       setGroups(gRes.data || []);
       setCategories(cRes.data || []);
       setPasswordCategories(pcRes.data || []);
     } catch (err) {
-      console.error('Error:', err.message);
+      console.error('fetchAll error:', err);
     } finally {
-      fetchInFlight.current = false;
-      setLoading(false);
-      setRefreshing(false);
+      if (myToken === fetchToken.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [user]);
 
   const fetchShared = useCallback(async ({ initial = false } = {}) => {
     if (!user) return;
-    if (fetchInFlight.current) return;
-    fetchInFlight.current = true;
+    const myToken = ++fetchToken.current;
     if (initial) setLoading(true);
     else setRefreshing(true);
     try {
@@ -161,15 +165,18 @@ const Dashboard = () => {
         .from('shares').select('password_id')
         .eq('shared_with_email', user.email);
       const ids = (shares || []).map(s => s.password_id);
+      if (myToken !== fetchToken.current) return;
       if (!ids.length) { setPasswords([]); return; }
       const { data } = await supabase.from('passwords').select('*').in('id', ids);
+      if (myToken !== fetchToken.current) return;
       setPasswords(data || []);
     } catch (err) {
-      console.error('Error:', err.message);
+      console.error('fetchShared error:', err);
     } finally {
-      fetchInFlight.current = false;
-      setLoading(false);
-      setRefreshing(false);
+      if (myToken === fetchToken.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [user]);
 
@@ -284,7 +291,6 @@ const Dashboard = () => {
       }
       return [savedItem, ...prev];
     });
-    // Sync local de password_categories para este item
     setPasswordCategories(prev => {
       const others = prev.filter(pc => pc.password_id !== savedItem.id);
       const mine = categoryIds.map(cid => ({
@@ -293,6 +299,41 @@ const Dashboard = () => {
       return [...others, ...mine];
     });
   }, [fetchAll, user]);
+
+  // Optimistic handlers para Group y Category
+  const handleGroupSaved = useCallback((saved) => {
+    if (!saved) { fetchAll({ silent: true }); return; }
+    if (saved.__deleted) {
+      setGroups(prev => prev.filter(g => g.id !== saved.id));
+      // Categorías huérfanas y password vínculos los limpia la DB por cascade
+      setCategories(prev => prev.filter(c => c.group_id !== saved.id));
+      return;
+    }
+    setGroups(prev => {
+      const idx = prev.findIndex(g => g.id === saved.id);
+      if (idx >= 0) {
+        const next = [...prev]; next[idx] = saved; return next;
+      }
+      return [...prev, saved].sort((a, b) => a.name.localeCompare(b.name));
+    });
+  }, [fetchAll]);
+
+  const handleCategorySaved = useCallback((saved) => {
+    if (!saved) { fetchAll({ silent: true }); return; }
+    if (saved.__deleted) {
+      setCategories(prev => prev.filter(c => c.id !== saved.id));
+      setPasswordCategories(prev => prev.filter(pc => pc.category_id !== saved.id));
+      setActiveCategoryIds(ids => ids.filter(id => id !== saved.id));
+      return;
+    }
+    setCategories(prev => {
+      const idx = prev.findIndex(c => c.id === saved.id);
+      if (idx >= 0) {
+        const next = [...prev]; next[idx] = saved; return next;
+      }
+      return [...prev, saved].sort((a, b) => a.name.localeCompare(b.name));
+    });
+  }, [fetchAll]);
 
   const toggleVis = (id) => setVisiblePasswords(p => ({ ...p, [id]: !p[id] }));
 
@@ -872,7 +913,7 @@ const Dashboard = () => {
         {showGroupModal && (
           <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={editingGroup ? 'Editar grupo' : 'Nuevo grupo'} onClick={(e) => e.target === e.currentTarget && setShowGroupModal(false)}>
             <div className="modal-content glass-card">
-              <GroupModal group={editingGroup} onClose={() => setShowGroupModal(false)} onSuccess={() => fetchAll({ silent: true })} userId={user.id} />
+              <GroupModal group={editingGroup} onClose={() => setShowGroupModal(false)} onSuccess={handleGroupSaved} userId={user.id} />
             </div>
           </div>
         )}
@@ -884,7 +925,7 @@ const Dashboard = () => {
                 groupId={editingCategoryGroupId}
                 groupName={groups.find(g => g.id === editingCategoryGroupId)?.name}
                 onClose={() => setShowCategoryModal(false)}
-                onSuccess={() => fetchAll({ silent: true })}
+                onSuccess={handleCategorySaved}
                 userId={user.id}
               />
             </div>

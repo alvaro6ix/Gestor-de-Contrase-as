@@ -53,21 +53,29 @@ const GroupModal = ({ group, onClose, onSuccess, userId }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (uploadingImage) return;
+    if (uploadingImage || loading) return;
     setLoading(true);
     try {
       const payload = { ...form, user_id: userId };
+      let saved;
       if (group) {
-        const { error } = await supabase.from('groups').update(payload).eq('id', group.id);
+        const { data, error } = await supabase
+          .from('groups').update(payload).eq('id', group.id)
+          .select().single();
         if (error) throw error;
+        saved = data;
       } else {
-        const { error } = await supabase.from('groups').insert([payload]);
+        const { data, error } = await supabase
+          .from('groups').insert([payload])
+          .select().single();
         if (error) throw error;
+        saved = data;
       }
-      onSuccess();
+      onSuccess(saved);
       onClose();
     } catch (err) {
-      alert(err.message);
+      console.error('Error guardando grupo:', err);
+      alert('No se pudo guardar el grupo: ' + (err.message || 'error desconocido'));
     } finally {
       setLoading(false);
     }
@@ -79,8 +87,11 @@ const GroupModal = ({ group, onClose, onSuccess, userId }) => {
     setLoading(true);
     const { error } = await supabase.from('groups').delete().eq('id', group.id);
     setLoading(false);
-    if (error) return alert(error.message);
-    onSuccess();
+    if (error) {
+      console.error('Error eliminando grupo:', error);
+      return alert('No se pudo eliminar: ' + error.message);
+    }
+    onSuccess({ __deleted: true, id: group.id });
     onClose();
   };
 

@@ -20,20 +20,33 @@ const CategoryModal = ({ category, groupId, groupName, onClose, onSuccess, userI
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (loading) return;
+    if (!groupId) {
+      alert('Falta el grupo de destino. Cierra y vuelve a abrir el formulario.');
+      return;
+    }
     setLoading(true);
     try {
       const payload = { ...form, group_id: groupId, user_id: userId };
+      let saved;
       if (category) {
-        const { error } = await supabase.from('categories').update(payload).eq('id', category.id);
+        const { data, error } = await supabase
+          .from('categories').update(payload).eq('id', category.id)
+          .select().single();
         if (error) throw error;
+        saved = data;
       } else {
-        const { error } = await supabase.from('categories').insert([payload]);
+        const { data, error } = await supabase
+          .from('categories').insert([payload])
+          .select().single();
         if (error) throw error;
+        saved = data;
       }
-      onSuccess();
+      onSuccess(saved);
       onClose();
     } catch (err) {
-      alert(err.message);
+      console.error('Error guardando categoría:', err);
+      alert('No se pudo guardar la categoría: ' + (err.message || 'error desconocido'));
     } finally {
       setLoading(false);
     }
@@ -45,8 +58,11 @@ const CategoryModal = ({ category, groupId, groupName, onClose, onSuccess, userI
     setLoading(true);
     const { error } = await supabase.from('categories').delete().eq('id', category.id);
     setLoading(false);
-    if (error) return alert(error.message);
-    onSuccess();
+    if (error) {
+      console.error('Error eliminando categoría:', error);
+      return alert('No se pudo eliminar: ' + error.message);
+    }
+    onSuccess({ __deleted: true, id: category.id });
     onClose();
   };
 
