@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import {
@@ -10,16 +10,25 @@ import {
   UserCog, Globe, FolderOpen, Inbox, CheckSquare, Square, Move, CheckCheck
 } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
-import PasswordGenerator from '../components/PasswordGenerator';
-import PasswordModal from '../components/PasswordModal';
-import PasswordHistory from '../components/PasswordHistory';
-import ShareModal from '../components/ShareModal';
-import UpdatePasswordModal from '../components/UpdatePasswordModal';
-import GroupModal from '../components/GroupModal';
-import CategoryModal from '../components/CategoryModal';
-import ProfileModal from '../components/ProfileModal';
-import MoveToGroupModal from '../components/MoveToGroupModal';
 import { buildShareMessage } from '../lib/shareMessage';
+
+// Lazy-loaded modals — solo se descargan cuando el usuario los abre.
+// Reduce el bundle inicial dramáticamente.
+const PasswordGenerator = lazy(() => import('../components/PasswordGenerator'));
+const PasswordModal = lazy(() => import('../components/PasswordModal'));
+const PasswordHistory = lazy(() => import('../components/PasswordHistory'));
+const ShareModal = lazy(() => import('../components/ShareModal'));
+const UpdatePasswordModal = lazy(() => import('../components/UpdatePasswordModal'));
+const GroupModal = lazy(() => import('../components/GroupModal'));
+const CategoryModal = lazy(() => import('../components/CategoryModal'));
+const ProfileModal = lazy(() => import('../components/ProfileModal'));
+const MoveToGroupModal = lazy(() => import('../components/MoveToGroupModal'));
+
+const ModalFallback = () => (
+  <div style={{ padding: '2rem', textAlign: 'center' }}>
+    <div className="spinner" style={{ margin: 0 }} />
+  </div>
+);
 
 const Logo = () => (
   <svg viewBox="0 0 40 40" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
@@ -86,9 +95,11 @@ const Dashboard = () => {
   const [expandedGroups, setExpandedGroups] = useState({}); // groupId -> bool
   const [visiblePasswords, setVisiblePasswords] = useState({});
   const [copied, setCopied] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);   // initial full-screen spinner
+  const [refreshing, setRefreshing] = useState(false); // soft top-bar indicator
   const [lightboxImage, setLightboxImage] = useState(null);
   const [mobileGroupsOpen, setMobileGroupsOpen] = useState(false);
+  const fetchInFlight = useRef(false);
 
   // Selection mode (bulk move)
   const [selectionMode, setSelectionMode] = useState(false);
@@ -109,9 +120,16 @@ const Dashboard = () => {
   const [selectedItem, setSelectedItem] = useState(null);
 
   // ── Data loaders ────────────────────────────────────────────────────────────
-  const fetchAll = async () => {
+  // initial=true muestra spinner full-screen. silent=true no muestra nada.
+  // Por defecto: indicador "refreshing" sutil sin blanquear la cuadrícula.
+  const fetchAll = useCallback(async ({ initial = false, silent = false } = {}) => {
     if (!user) return;
-    setLoading(true);
+    if (fetchInFlight.current) return; // evita carreras
+    fetchInFlight.current = true;
+
+    if (initial) setLoading(true);
+    else if (!silent) setRefreshing(true);
+
     try {
       const [pRes, gRes, cRes, pcRes] = await Promise.all([
         supabase.from('passwords').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
@@ -126,35 +144,49 @@ const Dashboard = () => {
     } catch (err) {
       console.error('Error:', err.message);
     } finally {
+      fetchInFlight.current = false;
       setLoading(false);
+      setRefreshing(false);
     }
-  };
+  }, [user]);
 
-  const fetchShared = async () => {
-    setLoading(true);
+  const fetchShared = useCallback(async ({ initial = false } = {}) => {
+    if (!user) return;
+    if (fetchInFlight.current) return;
+    fetchInFlight.current = true;
+    if (initial) setLoading(true);
+    else setRefreshing(true);
     try {
       const { data: shares } = await supabase
         .from('shares').select('password_id')
         .eq('shared_with_email', user.email);
       const ids = (shares || []).map(s => s.password_id);
-      if (!ids.length) { setPasswords([]); setLoading(false); return; }
+      if (!ids.length) { setPasswords([]); return; }
       const { data } = await supabase.from('passwords').select('*').in('id', ids);
       setPasswords(data || []);
     } catch (err) {
       console.error('Error:', err.message);
     } finally {
+      fetchInFlight.current = false;
       setLoading(false);
+      setRefreshing(false);
     }
-  };
+  }, [user]);
 
+  // Carga inicial: full-screen spinner una sola vez.
+  // Al cambiar de/hacia "shared", refresca silenciosamente.
+  const initialLoadDone = useRef(false);
   useEffect(() => {
     if (!user) return;
+    const isInitial = !initialLoadDone.current;
     if (view === 'shared') {
-      fetchShared();
+      fetchShared({ initial: isInitial });
     } else {
-      fetchAll();
+      fetchAll({ initial: isInitial });
     }
-  }, [user, view === 'shared' ? view : 'mine']);
+    initialLoadDone.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, view === 'shared']);
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
   const pwdToCategoryIds = useMemo(() => {
@@ -226,9 +258,41 @@ const Dashboard = () => {
   // ── Actions ─────────────────────────────────────────────────────────────────
   const handleDelete = async (id) => {
     if (!confirm('¿Eliminar esta clave permanentemente?')) return;
+    // Optimistic remove
+    setPasswords(prev => prev.filter(p => p.id !== id));
+    setPasswordCategories(prev => prev.filter(pc => pc.password_id !== id));
     const { error } = await supabase.from('passwords').delete().eq('id', id);
-    if (!error) fetchAll();
+    if (error) {
+      alert('Error al eliminar: ' + error.message);
+      fetchAll({ silent: false }); // resync si falló
+    }
   };
+
+  // onSuccess para PasswordModal: actualiza estado local en lugar de refetch full.
+  // Recibe el item guardado y los categoryIds que el usuario seleccionó.
+  const handlePasswordSaved = useCallback((savedItem, categoryIds = []) => {
+    if (!savedItem) {
+      fetchAll({ silent: true });
+      return;
+    }
+    setPasswords(prev => {
+      const idx = prev.findIndex(p => p.id === savedItem.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = savedItem;
+        return next;
+      }
+      return [savedItem, ...prev];
+    });
+    // Sync local de password_categories para este item
+    setPasswordCategories(prev => {
+      const others = prev.filter(pc => pc.password_id !== savedItem.id);
+      const mine = categoryIds.map(cid => ({
+        password_id: savedItem.id, category_id: cid, user_id: user.id
+      }));
+      return [...others, ...mine];
+    });
+  }, [fetchAll, user]);
 
   const toggleVis = (id) => setVisiblePasswords(p => ({ ...p, [id]: !p[id] }));
 
@@ -279,6 +343,26 @@ const Dashboard = () => {
     setSelectedIds(filtered.map(p => p.id));
   };
   const isAllSelected = selectedIds.length > 0 && selectedIds.length === filtered.length;
+
+  // ── ESC global: cierra el modal de mayor prioridad abierto ──────────────────
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      if (lightboxImage) return setLightboxImage(null); // lightbox tiene su propio handler
+      if (showMoveModal) return setShowMoveModal(false);
+      if (showProfile) return setShowProfile(false);
+      if (showCategoryModal) return setShowCategoryModal(false);
+      if (showGroupModal) return setShowGroupModal(false);
+      if (showShare) return setShowShare(false);
+      if (showHistory) return setShowHistory(false);
+      if (showModal) return setShowModal(false);
+      if (showGenerator) return setShowGenerator(false);
+      if (mobileGroupsOpen) return setMobileGroupsOpen(false);
+      if (selectionMode) return exitSelectionMode();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightboxImage, showMoveModal, showProfile, showCategoryModal, showGroupModal, showShare, showHistory, showModal, showGenerator, mobileGroupsOpen, selectionMode]);
 
   // ── Sidebar tree ────────────────────────────────────────────────────────────
   const SidebarTree = ({ mobile = false }) => (
@@ -428,6 +512,11 @@ const Dashboard = () => {
               <span className="truncate">{viewTitle}</span>
             </h1>
             <p className="text-small">
+              {refreshing && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', marginRight: '0.5rem', color: 'var(--primary)' }} aria-live="polite">
+                  <RefreshCw size={11} style={{ animation: 'spin 1s linear infinite' }} /> Actualizando
+                </span>
+              )}
               {filtered.length} acceso{filtered.length !== 1 ? 's' : ''}
               {activeGroup?.description ? ` · ${activeGroup.description}` : ''}
               {activeGroup?.url ? (
@@ -645,19 +734,19 @@ const Dashboard = () => {
 
                   {!selectionMode && (
                     <div className="card-actions">
-                      <button className="btn-icon" title="Historial" onClick={() => { setSelectedItem(item); setShowHistory(true); }}>
+                      <button className="btn-icon" title="Historial" aria-label={`Ver historial de ${item.title}`} onClick={() => { setSelectedItem(item); setShowHistory(true); }}>
                         <History size={16} />
                       </button>
-                      <button className="btn-icon" title="Editar" onClick={() => { setSelectedItem(item); setShowModal(true); }}>
+                      <button className="btn-icon" title="Editar" aria-label={`Editar ${item.title}`} onClick={() => { setSelectedItem(item); setShowModal(true); }}>
                         <Edit size={16} />
                       </button>
-                      <button className="btn-icon" title="Compartir internamente" onClick={() => { setSelectedItem(item); setShowShare(true); }}>
+                      <button className="btn-icon" title="Compartir internamente" aria-label={`Compartir ${item.title} por correo`} onClick={() => { setSelectedItem(item); setShowShare(true); }}>
                         <Share2 size={16} />
                       </button>
-                      <button className="btn-icon" title="Compartir por WhatsApp" onClick={() => shareWhatsApp(item)} style={{ color: '#25D366' }}>
+                      <button className="btn-icon" title="Compartir por WhatsApp" aria-label={`Compartir ${item.title} por WhatsApp`} onClick={() => shareWhatsApp(item)} style={{ color: '#25D366' }}>
                         <ExternalLink size={16} />
                       </button>
-                      <button className="btn-icon btn-danger" title="Eliminar" onClick={() => handleDelete(item.id)}>
+                      <button className="btn-icon btn-danger" title="Eliminar" aria-label={`Eliminar ${item.title}`} onClick={() => handleDelete(item.id)}>
                         <Trash2 size={16} />
                       </button>
                     </div>
@@ -743,90 +832,94 @@ const Dashboard = () => {
         </button>
       </nav>
 
-      {/* Modals */}
-      {showGenerator && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowGenerator(false)}>
-          <div className="modal-content glass-card">
-            <PasswordGenerator onClose={() => setShowGenerator(false)} />
+      {/* Modals (lazy-loaded, wrapped in single Suspense) */}
+      <Suspense fallback={null}>
+        {showGenerator && (
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Generador de contraseñas" onClick={(e) => e.target === e.currentTarget && setShowGenerator(false)}>
+            <div className="modal-content glass-card">
+              <PasswordGenerator onClose={() => setShowGenerator(false)} />
+            </div>
           </div>
-        </div>
-      )}
-      {showModal && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowModal(false)}>
-          <div className="modal-content glass-card">
-            <PasswordModal
-              item={selectedItem}
-              onClose={() => setShowModal(false)}
-              onSuccess={fetchAll}
-              userId={user.id}
-              defaultGroupId={!selectedItem && view !== 'all' && view !== 'shared' && view !== 'unclassified' ? view : null}
-              defaultCategoryId={!selectedItem && activeCategoryIds.length === 1 ? activeCategoryIds[0] : null}
-            />
+        )}
+        {showModal && (
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={selectedItem ? 'Editar acceso' : 'Nuevo acceso'} onClick={(e) => e.target === e.currentTarget && setShowModal(false)}>
+            <div className="modal-content glass-card">
+              <PasswordModal
+                item={selectedItem}
+                onClose={() => setShowModal(false)}
+                onSuccess={handlePasswordSaved}
+                userId={user.id}
+                defaultGroupId={!selectedItem && view !== 'all' && view !== 'shared' && view !== 'unclassified' ? view : null}
+                defaultCategoryId={!selectedItem && activeCategoryIds.length === 1 ? activeCategoryIds[0] : null}
+              />
+            </div>
           </div>
-        </div>
-      )}
-      {showHistory && selectedItem && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowHistory(false)}>
-          <div className="modal-content glass-card">
-            <PasswordHistory passwordId={selectedItem.id} currentPassword={selectedItem.password} title={selectedItem.title} onClose={() => setShowHistory(false)} />
+        )}
+        {showHistory && selectedItem && (
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Historial de contraseñas" onClick={(e) => e.target === e.currentTarget && setShowHistory(false)}>
+            <div className="modal-content glass-card">
+              <PasswordHistory passwordId={selectedItem.id} currentPassword={selectedItem.password} title={selectedItem.title} onClose={() => setShowHistory(false)} />
+            </div>
           </div>
-        </div>
-      )}
-      {showShare && selectedItem && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowShare(false)}>
-          <div className="modal-content glass-card">
-            <ShareModal item={selectedItem} onClose={() => setShowShare(false)} userId={user.id} />
+        )}
+        {showShare && selectedItem && (
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Compartir acceso" onClick={(e) => e.target === e.currentTarget && setShowShare(false)}>
+            <div className="modal-content glass-card">
+              <ShareModal item={selectedItem} onClose={() => setShowShare(false)} userId={user.id} />
+            </div>
           </div>
-        </div>
-      )}
-      {showGroupModal && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowGroupModal(false)}>
-          <div className="modal-content glass-card">
-            <GroupModal group={editingGroup} onClose={() => setShowGroupModal(false)} onSuccess={fetchAll} userId={user.id} />
+        )}
+        {showGroupModal && (
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={editingGroup ? 'Editar grupo' : 'Nuevo grupo'} onClick={(e) => e.target === e.currentTarget && setShowGroupModal(false)}>
+            <div className="modal-content glass-card">
+              <GroupModal group={editingGroup} onClose={() => setShowGroupModal(false)} onSuccess={() => fetchAll({ silent: true })} userId={user.id} />
+            </div>
           </div>
-        </div>
-      )}
-      {showCategoryModal && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowCategoryModal(false)}>
-          <div className="modal-content glass-card">
-            <CategoryModal
-              category={editingCategory}
-              groupId={editingCategoryGroupId}
-              groupName={groups.find(g => g.id === editingCategoryGroupId)?.name}
-              onClose={() => setShowCategoryModal(false)}
-              onSuccess={fetchAll}
-              userId={user.id}
-            />
+        )}
+        {showCategoryModal && (
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={editingCategory ? 'Editar categoría' : 'Nueva categoría'} onClick={(e) => e.target === e.currentTarget && setShowCategoryModal(false)}>
+            <div className="modal-content glass-card">
+              <CategoryModal
+                category={editingCategory}
+                groupId={editingCategoryGroupId}
+                groupName={groups.find(g => g.id === editingCategoryGroupId)?.name}
+                onClose={() => setShowCategoryModal(false)}
+                onSuccess={() => fetchAll({ silent: true })}
+                userId={user.id}
+              />
+            </div>
           </div>
-        </div>
-      )}
-      {showProfile && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowProfile(false)}>
-          <div className="modal-content glass-card">
-            <ProfileModal onClose={() => setShowProfile(false)} />
+        )}
+        {showProfile && (
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Mi perfil" onClick={(e) => e.target === e.currentTarget && setShowProfile(false)}>
+            <div className="modal-content glass-card">
+              <ProfileModal onClose={() => setShowProfile(false)} />
+            </div>
           </div>
-        </div>
-      )}
-      {showMoveModal && (
-        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowMoveModal(false)}>
-          <div className="modal-content glass-card">
-            <MoveToGroupModal
-              itemIds={selectedIds}
-              groups={groups}
-              categories={categories}
-              onClose={() => setShowMoveModal(false)}
-              onSuccess={() => { fetchAll(); exitSelectionMode(); }}
-              userId={user.id}
-            />
+        )}
+        {showMoveModal && (
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Mover a grupo" onClick={(e) => e.target === e.currentTarget && setShowMoveModal(false)}>
+            <div className="modal-content glass-card">
+              <MoveToGroupModal
+                itemIds={selectedIds}
+                groups={groups}
+                categories={categories}
+                onClose={() => setShowMoveModal(false)}
+                onSuccess={() => { fetchAll({ silent: true }); exitSelectionMode(); }}
+                userId={user.id}
+              />
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </Suspense>
       {recoveryMode && (
-        <div className="modal-overlay">
-          <div className="modal-content glass-card">
-            <UpdatePasswordModal />
+        <Suspense fallback={null}>
+          <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Cambiar contraseña">
+            <div className="modal-content glass-card">
+              <UpdatePasswordModal />
+            </div>
           </div>
-        </div>
+        </Suspense>
       )}
 
       {/* Image Lightbox */}

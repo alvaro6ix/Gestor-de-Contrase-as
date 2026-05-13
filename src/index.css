@@ -20,6 +20,19 @@
 body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-light);color:var(--text-dark);min-height:100vh;-webkit-font-smoothing:antialiased;transition:background 0.3s,color 0.3s;}
 body.dark{background:var(--bg-dark);color:var(--text-light);}
 
+/* A11y: focus visible para keyboard users */
+:focus{outline:none;}
+:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:4px;}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--primary);outline-offset:2px;}
+
+/* Respeta usuarios con motion-sickness */
+@media (prefers-reduced-motion: reduce){
+  *{animation-duration:0.01ms!important;animation-iteration-count:1!important;transition-duration:0.01ms!important;}
+}
+
+/* Screen-reader-only utility */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}
+
 /* Typography */
 h1,h2,h3{font-weight:900;letter-spacing:-0.02em;}
 .text-small{font-size:0.78rem;opacity:0.6;}

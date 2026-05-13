@@ -83,15 +83,26 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
         const { data: urlData } = supabase.storage.from('password-icons').getPublicUrl(filename);
         setFormData(f => ({ ...f, image_url: urlData.publicUrl }));
       } else {
-        const reader2 = new FileReader();
-        reader2.onloadend = () => setFormData(f => ({ ...f, image_url: reader2.result }));
-        reader2.readAsDataURL(file);
-        await new Promise(resolve => setTimeout(resolve, 300));
+        // Fallback: store as base64 data URL (await readAsDataURL via Promise wrapper)
+        const dataUrl = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onloadend = () => resolve(r.result);
+          r.onerror = reject;
+          r.readAsDataURL(file);
+        });
+        setFormData(f => ({ ...f, image_url: dataUrl }));
       }
     } catch {
-      const reader3 = new FileReader();
-      reader3.onloadend = () => setFormData(f => ({ ...f, image_url: reader3.result }));
-      reader3.readAsDataURL(file);
+      // Last-resort fallback
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onloadend = () => resolve(r.result);
+          r.onerror = reject;
+          r.readAsDataURL(file);
+        });
+        setFormData(f => ({ ...f, image_url: dataUrl }));
+      } catch { /* give up */ }
     } finally {
       setUploadingImage(false);
     }
@@ -103,50 +114,65 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (uploadingImage) return;
+    if (uploadingImage || loading) return;
     setLoading(true);
     try {
       const payload = {
-        title: formData.title,
-        description: formData.description,
-        email: formData.email,
+        title: formData.title.trim(),
+        description: formData.description?.trim() || null,
+        email: formData.email.trim(),
         password: formData.password,
-        image_url: formData.image_url,
-        url: formData.url || null,
+        image_url: formData.image_url || null,
+        url: formData.url?.trim() || null,
         group_id: formData.group_id || null,
         user_id: userId,
         updated_at: new Date().toISOString()
       };
 
-      let passwordId;
+      let savedItem;
       if (item) {
-        if (formData.password !== item.password) {
-          await supabase.from('password_history').insert({
-            password_id: item.id,
-            old_password: item.password,
-            new_password: formData.password
-          });
-        }
-        const { error } = await supabase.from('passwords').update(payload).eq('id', item.id);
+        // Paralelizar: si la clave cambió, history insert + update corren a la vez
+        const historyPromise = (formData.password !== item.password)
+          ? supabase.from('password_history').insert({
+              password_id: item.id,
+              old_password: item.password,
+              new_password: formData.password
+            })
+          : Promise.resolve();
+
+        const [_, { data, error }] = await Promise.all([
+          historyPromise,
+          supabase.from('passwords').update(payload).eq('id', item.id).select().single()
+        ]);
         if (error) throw error;
-        passwordId = item.id;
+        savedItem = data;
+
+        // Para items existentes: borra vínculos previos y crea los nuevos en paralelo
+        const newCats = formData.group_id ? selectedCategoryIds : [];
+        const delPromise = supabase.from('password_categories').delete().eq('password_id', item.id);
+        await delPromise;
+        if (newCats.length) {
+          const rows = newCats.map(cid => ({ password_id: item.id, category_id: cid, user_id: userId }));
+          const { error: pcErr } = await supabase.from('password_categories').insert(rows);
+          if (pcErr) throw pcErr;
+        }
       } else {
+        // Item nuevo: solo INSERT + (si hay categorías) INSERT pc. No hace falta DELETE.
         const { data, error } = await supabase.from('passwords').insert([payload]).select().single();
         if (error) throw error;
-        passwordId = data.id;
+        savedItem = data;
+
+        if (formData.group_id && selectedCategoryIds.length) {
+          const rows = selectedCategoryIds.map(cid => ({
+            password_id: data.id, category_id: cid, user_id: userId
+          }));
+          const { error: pcErr } = await supabase.from('password_categories').insert(rows);
+          if (pcErr) throw pcErr;
+        }
       }
 
-      // Sync category relations: remove old, insert current
-      await supabase.from('password_categories').delete().eq('password_id', passwordId);
-      if (selectedCategoryIds.length && formData.group_id) {
-        const rows = selectedCategoryIds.map(cid => ({
-          password_id: passwordId, category_id: cid, user_id: userId
-        }));
-        const { error: pcErr } = await supabase.from('password_categories').insert(rows);
-        if (pcErr) throw pcErr;
-      }
-
-      onSuccess();
+      // Cerrar inmediatamente. El padre actualiza la lista de forma optimista.
+      onSuccess(savedItem, selectedCategoryIds);
       onClose();
     } catch (err) {
       alert(err.message);
@@ -176,9 +202,10 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
       <form onSubmit={handleSubmit}>
         {/* Title */}
         <div className="input-group">
-          <label className="input-label">Nombre del Servicio</label>
-          <input type="text" required className="input-field" style={{ paddingLeft: '1rem' }}
+          <label className="input-label" htmlFor="pwd-title">Nombre del Servicio</label>
+          <input id="pwd-title" type="text" required className="input-field" style={{ paddingLeft: '1rem' }}
             placeholder="ej: Gmail, Instagram, Oscar CRM..."
+            autoFocus
             value={formData.title} onChange={(e) => setFormData(f => ({ ...f, title: e.target.value }))} />
         </div>
 
