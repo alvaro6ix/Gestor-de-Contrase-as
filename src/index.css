@@ -225,6 +225,20 @@ body.dark .chip-add{border-color:rgba(255,255,255,0.18);}
 body.dark .category-empty{border-color:rgba(255,255,255,0.12);}
 
 /* =====================
+   Selection mode (bulk move)
+   ===================== */
+.password-card.selectable{cursor:pointer;position:relative;user-select:none;}
+.password-card.selectable:hover{border-color:var(--primary);}
+.password-card.selected{border-color:var(--primary);box-shadow:0 0 0 2px var(--primary),0 8px 24px rgba(255,211,0,0.18);}
+.card-checkbox{position:absolute;top:0.55rem;right:0.55rem;z-index:2;background:rgba(255,255,255,0.85);border-radius:6px;padding:0.18rem;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+body.dark .card-checkbox{background:rgba(0,0,0,0.55);}
+
+.selection-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:1.2rem;z-index:900;display:flex;align-items:center;gap:0.6rem;padding:0.55rem 0.7rem;min-width:min(560px,90vw);max-width:92vw;border-radius:14px;box-shadow:0 14px 40px rgba(0,0,0,0.18);animation:fadeUp 0.22s var(--expo-out);}
+@media(max-width:768px){
+  .selection-bar{bottom:calc(78px + env(safe-area-inset-bottom,0px));min-width:0;width:calc(100% - 1rem);}
+}
+
+/* =====================
    Card tags (group + categories)
    ===================== */
 .card-tags{display:flex;flex-wrap:wrap;gap:0.25rem;margin-bottom:0.6rem;}

@@ -7,7 +7,7 @@ import {
   Edit, Trash2, Share2, Copy,
   History, RefreshCw, X, ExternalLink,
   Home, ZoomIn, Folder, FolderPlus, Tag, ChevronDown, ChevronRight,
-  UserCog, Globe, FolderOpen, Inbox
+  UserCog, Globe, FolderOpen, Inbox, CheckSquare, Square, Move, CheckCheck
 } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
 import PasswordGenerator from '../components/PasswordGenerator';
@@ -18,6 +18,7 @@ import UpdatePasswordModal from '../components/UpdatePasswordModal';
 import GroupModal from '../components/GroupModal';
 import CategoryModal from '../components/CategoryModal';
 import ProfileModal from '../components/ProfileModal';
+import MoveToGroupModal from '../components/MoveToGroupModal';
 import { buildShareMessage } from '../lib/shareMessage';
 
 const Logo = () => (
@@ -88,6 +89,11 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [lightboxImage, setLightboxImage] = useState(null);
   const [mobileGroupsOpen, setMobileGroupsOpen] = useState(false);
+
+  // Selection mode (bulk move)
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [showMoveModal, setShowMoveModal] = useState(false);
 
   // Modals
   const [showGenerator, setShowGenerator] = useState(false);
@@ -263,6 +269,17 @@ const Dashboard = () => {
     setActiveCategoryIds(ids => ids.includes(cid) ? ids.filter(x => x !== cid) : [...ids, cid]);
   };
 
+  // ── Selection mode helpers ──────────────────────────────────────────────────
+  const enterSelectionMode = () => { setSelectionMode(true); setSelectedIds([]); };
+  const exitSelectionMode = () => { setSelectionMode(false); setSelectedIds([]); };
+  const toggleSelect = (id) => {
+    setSelectedIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]);
+  };
+  const selectAllVisible = () => {
+    setSelectedIds(filtered.map(p => p.id));
+  };
+  const isAllSelected = selectedIds.length > 0 && selectedIds.length === filtered.length;
+
   // ── Sidebar tree ────────────────────────────────────────────────────────────
   const SidebarTree = ({ mobile = false }) => (
     <>
@@ -428,6 +445,19 @@ const Dashboard = () => {
               style={{ padding: '0.4rem 0.6rem' }}>
               <FolderOpen size={16} />
             </button>
+            {filtered.length > 0 && (
+              selectionMode ? (
+                <button className="btn btn-ghost" onClick={exitSelectionMode}
+                  style={{ padding: '0.4rem 0.7rem', fontSize: '0.8rem' }}>
+                  <X size={16} /> <span className="desktop-only">Cancelar</span>
+                </button>
+              ) : (
+                <button className="btn btn-ghost" onClick={enterSelectionMode}
+                  style={{ padding: '0.4rem 0.7rem', fontSize: '0.8rem' }} title="Seleccionar varios">
+                  <CheckSquare size={16} /> <span className="desktop-only">Seleccionar</span>
+                </button>
+              )
+            )}
             <button className="btn-icon glass-card desktop-only" onClick={toggleTheme} aria-label="Tema">
               {isDark ? <Sun size={18} /> : <Moon size={18} />}
             </button>
@@ -524,8 +554,16 @@ const Dashboard = () => {
                 .map(cid => categories.find(c => c.id === cid))
                 .filter(Boolean);
               const itemGroup = groups.find(g => g.id === item.group_id);
+              const isSelected = selectedIds.includes(item.id);
               return (
-                <div key={item.id} className="password-card glass-card">
+                <div key={item.id}
+                  className={`password-card glass-card${selectionMode ? ' selectable' : ''}${isSelected ? ' selected' : ''}`}
+                  onClick={selectionMode ? () => toggleSelect(item.id) : undefined}>
+                  {selectionMode && (
+                    <div className="card-checkbox" onClick={(e) => { e.stopPropagation(); toggleSelect(item.id); }}>
+                      {isSelected ? <CheckSquare size={20} color="var(--primary)" /> : <Square size={20} style={{ opacity: 0.4 }} />}
+                    </div>
+                  )}
                   <div className="card-header">
                     <div className="card-icon"
                       style={{ position: 'relative', cursor: item.image_url ? 'zoom-in' : 'default' }}
@@ -605,23 +643,25 @@ const Dashboard = () => {
                     )}
                   </div>
 
-                  <div className="card-actions">
-                    <button className="btn-icon" title="Historial" onClick={() => { setSelectedItem(item); setShowHistory(true); }}>
-                      <History size={16} />
-                    </button>
-                    <button className="btn-icon" title="Editar" onClick={() => { setSelectedItem(item); setShowModal(true); }}>
-                      <Edit size={16} />
-                    </button>
-                    <button className="btn-icon" title="Compartir internamente" onClick={() => { setSelectedItem(item); setShowShare(true); }}>
-                      <Share2 size={16} />
-                    </button>
-                    <button className="btn-icon" title="Compartir por WhatsApp" onClick={() => shareWhatsApp(item)} style={{ color: '#25D366' }}>
-                      <ExternalLink size={16} />
-                    </button>
-                    <button className="btn-icon btn-danger" title="Eliminar" onClick={() => handleDelete(item.id)}>
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
+                  {!selectionMode && (
+                    <div className="card-actions">
+                      <button className="btn-icon" title="Historial" onClick={() => { setSelectedItem(item); setShowHistory(true); }}>
+                        <History size={16} />
+                      </button>
+                      <button className="btn-icon" title="Editar" onClick={() => { setSelectedItem(item); setShowModal(true); }}>
+                        <Edit size={16} />
+                      </button>
+                      <button className="btn-icon" title="Compartir internamente" onClick={() => { setSelectedItem(item); setShowShare(true); }}>
+                        <Share2 size={16} />
+                      </button>
+                      <button className="btn-icon" title="Compartir por WhatsApp" onClick={() => shareWhatsApp(item)} style={{ color: '#25D366' }}>
+                        <ExternalLink size={16} />
+                      </button>
+                      <button className="btn-icon btn-danger" title="Eliminar" onClick={() => handleDelete(item.id)}>
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -657,6 +697,25 @@ const Dashboard = () => {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Selection action bar (floating, appears when in selection mode) */}
+      {selectionMode && (
+        <div className="selection-bar glass-card">
+          <button className="btn btn-ghost" onClick={isAllSelected ? () => setSelectedIds([]) : selectAllVisible}
+            style={{ padding: '0.4rem 0.7rem' }}>
+            <CheckCheck size={16} />
+            <span className="desktop-only">{isAllSelected ? 'Quitar todo' : `Todo (${filtered.length})`}</span>
+          </button>
+          <div style={{ flex: 1, fontWeight: 800, fontSize: '0.88rem', textAlign: 'center' }}>
+            {selectedIds.length === 0 ? 'Toca tarjetas para seleccionar' : `${selectedIds.length} seleccionado${selectedIds.length !== 1 ? 's' : ''}`}
+          </div>
+          <button className="btn btn-primary" disabled={selectedIds.length === 0}
+            onClick={() => setShowMoveModal(true)}
+            style={{ padding: '0.5rem 0.9rem' }}>
+            <Move size={16} /> <span className="desktop-only">Mover a grupo</span>
+          </button>
         </div>
       )}
 
@@ -745,6 +804,20 @@ const Dashboard = () => {
         <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowProfile(false)}>
           <div className="modal-content glass-card">
             <ProfileModal onClose={() => setShowProfile(false)} />
+          </div>
+        </div>
+      )}
+      {showMoveModal && (
+        <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && setShowMoveModal(false)}>
+          <div className="modal-content glass-card">
+            <MoveToGroupModal
+              itemIds={selectedIds}
+              groups={groups}
+              categories={categories}
+              onClose={() => setShowMoveModal(false)}
+              onSuccess={() => { fetchAll(); exitSelectionMode(); }}
+              userId={user.id}
+            />
           </div>
         </div>
       )}
