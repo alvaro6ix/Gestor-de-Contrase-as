@@ -249,6 +249,10 @@ const Dashboard = () => {
     setView(v);
     setActiveCategoryIds([]);
     setMobileGroupsOpen(false);
+    // Auto-expand the group in the sidebar so categorías sean visibles
+    if (v && v !== 'all' && v !== 'shared' && v !== 'unclassified') {
+      setExpandedGroups(e => ({ ...e, [v]: true }));
+    }
   };
 
   const toggleGroupExpand = (gid) => {
@@ -433,28 +437,50 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Category filter chips (only when viewing a group) */}
-        {activeGroup && (categoriesByGroup[activeGroup.id]?.length > 0) && (
-          <div className="category-chips">
-            <button className={`chip${activeCategoryIds.length === 0 ? ' chip-active' : ''}`}
-              onClick={() => setActiveCategoryIds([])}>
-              Todas
-            </button>
-            {(categoriesByGroup[activeGroup.id] || []).map(c => {
-              const on = activeCategoryIds.includes(c.id);
-              return (
-                <button key={c.id} className={`chip${on ? ' chip-active' : ''}`}
-                  onClick={() => toggleCategoryFilter(c.id)}
-                  style={on ? { background: c.color || 'var(--primary)', color: '#000' } : {}}>
-                  <Tag size={11} /> {c.name}
-                </button>
-              );
-            })}
-            <button className="chip chip-add"
-              onClick={() => { setEditingCategory(null); setEditingCategoryGroupId(activeGroup.id); setShowCategoryModal(true); }}>
-              <Plus size={11} /> Categoría
-            </button>
-          </div>
+        {/* Category bar — always visible when a group is selected */}
+        {activeGroup && (
+          (categoriesByGroup[activeGroup.id]?.length > 0) ? (
+            <div className="category-chips">
+              <button className={`chip${activeCategoryIds.length === 0 ? ' chip-active' : ''}`}
+                onClick={() => setActiveCategoryIds([])}>
+                Todas
+              </button>
+              {(categoriesByGroup[activeGroup.id] || []).map(c => {
+                const on = activeCategoryIds.includes(c.id);
+                return (
+                  <button key={c.id} className={`chip${on ? ' chip-active' : ''}`}
+                    onClick={() => toggleCategoryFilter(c.id)}
+                    style={on ? { background: c.color || 'var(--primary)', color: '#000' } : {}}>
+                    <Tag size={11} /> {c.name}
+                  </button>
+                );
+              })}
+              <button className="chip chip-add"
+                onClick={() => { setEditingCategory(null); setEditingCategoryGroupId(activeGroup.id); setShowCategoryModal(true); }}>
+                <Plus size={11} /> Nueva categoría
+              </button>
+              <button className="chip chip-add"
+                onClick={() => { setEditingGroup(activeGroup); setShowGroupModal(true); }}
+                title="Editar grupo">
+                <Edit size={11} /> Editar grupo
+              </button>
+            </div>
+          ) : (
+            <div className="category-empty glass-card">
+              <Tag size={18} style={{ opacity: 0.35 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 800, fontSize: '0.85rem' }}>Sin categorías todavía</div>
+                <p className="text-small" style={{ marginTop: '0.15rem' }}>
+                  Crea roles o áreas dentro de <strong>{activeGroup.name}</strong> (ej: Administrador, Ventas, Soporte) para organizar los accesos.
+                </p>
+              </div>
+              <button className="btn btn-primary"
+                onClick={() => { setEditingCategory(null); setEditingCategoryGroupId(activeGroup.id); setShowCategoryModal(true); }}
+                style={{ flexShrink: 0 }}>
+                <Plus size={16} /> <span className="desktop-only">Nueva categoría</span>
+              </button>
+            </div>
+          )
         )}
 
         {/* Search */}
