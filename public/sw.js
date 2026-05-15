@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gestor-v5';
+const CACHE_NAME = 'gestor-v6';
 
 // On install: skip waiting immediately so new SW takes over fast
 self.addEventListener('install', (event) => {

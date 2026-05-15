@@ -112,73 +112,80 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
     setSelectedCategoryIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]);
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
     if (uploadingImage || loading) return;
-    setLoading(true);
-    try {
-      const payload = {
-        title: formData.title.trim(),
-        description: formData.description?.trim() || null,
-        email: formData.email.trim(),
-        password: formData.password,
-        image_url: formData.image_url || null,
-        url: formData.url?.trim() || null,
-        group_id: formData.group_id || null,
-        user_id: userId,
-        updated_at: new Date().toISOString()
-      };
 
-      let savedItem;
-      if (item) {
-        // Paralelizar: si la clave cambió, history insert + update corren a la vez
-        const historyPromise = (formData.password !== item.password)
-          ? supabase.from('password_history').insert({
-              password_id: item.id,
-              old_password: item.password,
-              new_password: formData.password
-            })
-          : Promise.resolve();
+    const isNew = !item;
+    // ID generado en cliente para nuevos items: nos permite cerrar el modal
+    // ANTES de que el servidor responda y aun así tener un ID estable.
+    const id = isNew ? (crypto?.randomUUID?.() ?? `tmp-${Date.now()}-${Math.random()}`) : item.id;
+    const now = new Date().toISOString();
 
-        const [_, { data, error }] = await Promise.all([
-          historyPromise,
-          supabase.from('passwords').update(payload).eq('id', item.id).select().single()
-        ]);
-        if (error) throw error;
-        savedItem = data;
+    // Campos que sí van al servidor (id/user_id/created_at se manejan aparte)
+    const dataFields = {
+      title: formData.title.trim(),
+      description: formData.description?.trim() || null,
+      email: formData.email.trim(),
+      password: formData.password,
+      image_url: formData.image_url || null,
+      url: formData.url?.trim() || null,
+      group_id: formData.group_id || null,
+    };
+    // Payload optimista (lo que ve el padre inmediatamente)
+    const optimisticItem = {
+      ...dataFields,
+      id,
+      user_id: userId,
+      updated_at: now,
+      created_at: isNew ? now : (item.created_at || now),
+    };
+    const catIds = formData.group_id ? selectedCategoryIds : [];
 
-        // Para items existentes: borra vínculos previos y crea los nuevos en paralelo
-        const newCats = formData.group_id ? selectedCategoryIds : [];
-        const delPromise = supabase.from('password_categories').delete().eq('password_id', item.id);
-        await delPromise;
-        if (newCats.length) {
-          const rows = newCats.map(cid => ({ password_id: item.id, category_id: cid, user_id: userId }));
-          const { error: pcErr } = await supabase.from('password_categories').insert(rows);
-          if (pcErr) throw pcErr;
+    // 1. Cierra inmediatamente y actualiza el padre de forma optimista.
+    onSuccess(optimisticItem, catIds);
+    onClose();
+
+    // 2. Persiste en Supabase en background. Errores se reportan vía alert.
+    (async () => {
+      try {
+        if (isNew) {
+          const insertRow = { ...dataFields, id, user_id: userId };
+          const { error } = await supabase.from('passwords').insert([insertRow]);
+          if (error) throw error;
+          if (catIds.length) {
+            const rows = catIds.map(cid => ({ password_id: id, category_id: cid, user_id: userId }));
+            const { error: pcErr } = await supabase.from('password_categories').insert(rows);
+            if (pcErr) throw pcErr;
+          }
+        } else {
+          const updateRow = { ...dataFields, updated_at: now };
+          const ops = [supabase.from('passwords').update(updateRow).eq('id', id)];
+          if (formData.password !== item.password) {
+            ops.push(supabase.from('password_history').insert({
+              password_id: id, old_password: item.password, new_password: formData.password,
+            }));
+          }
+          const results = await Promise.all(ops);
+          const failed = results.find(r => r?.error);
+          if (failed) throw failed.error;
+          const { error: delErr } = await supabase.from('password_categories').delete().eq('password_id', id);
+          if (delErr) throw delErr;
+          if (catIds.length) {
+            const rows = catIds.map(cid => ({ password_id: id, category_id: cid, user_id: userId }));
+            const { error: pcErr } = await supabase.from('password_categories').insert(rows);
+            if (pcErr) throw pcErr;
+          }
         }
-      } else {
-        // Item nuevo: solo INSERT + (si hay categorías) INSERT pc. No hace falta DELETE.
-        const { data, error } = await supabase.from('passwords').insert([payload]).select().single();
-        if (error) throw error;
-        savedItem = data;
-
-        if (formData.group_id && selectedCategoryIds.length) {
-          const rows = selectedCategoryIds.map(cid => ({
-            password_id: data.id, category_id: cid, user_id: userId
-          }));
-          const { error: pcErr } = await supabase.from('password_categories').insert(rows);
-          if (pcErr) throw pcErr;
-        }
+      } catch (err) {
+        console.error('PasswordModal background save failed:', err);
+        alert(
+          'No se pudo guardar en el servidor:\n' +
+          (err?.message || err?.error_description || 'Error desconocido') +
+          '\n\nRecarga la página para ver el estado real.'
+        );
       }
-
-      // Cerrar inmediatamente. El padre actualiza la lista de forma optimista.
-      onSuccess(savedItem, selectedCategoryIds);
-      onClose();
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setLoading(false);
-    }
+    })();
   };
 
   const availableCategories = formData.group_id
