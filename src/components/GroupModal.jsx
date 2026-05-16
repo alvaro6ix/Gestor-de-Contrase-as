@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, Folder, Link, Upload, Camera, Loader, Trash2 } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
+import { enqueue } from '../lib/syncQueue';
 
 const COLORS = ['#ffd300', '#00bcd4', '#7c4dff', '#ff5722', '#4caf50', '#e91e63', '#3f51b5', '#ff9800'];
 
@@ -28,71 +29,75 @@ const GroupModal = ({ group, onClose, onSuccess, userId }) => {
 
   const handleImageFile = async (file) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => setImagePreview(reader.result);
-    reader.readAsDataURL(file);
     setUploadingImage(true);
+
+    const toDataUrl = (f) => new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onloadend = () => resolve(r.result);
+      r.onerror = reject;
+      r.readAsDataURL(f);
+    });
+
     try {
+      const dataUrl = await toDataUrl(file);
+      setImagePreview(dataUrl);
+
       const ext = file.name.split('.').pop() || 'jpg';
       const filename = `${userId}/groups/${Date.now()}.${ext}`;
-      const { error } = await supabase.storage
+      const uploadPromise = supabase.storage
         .from('password-icons')
         .upload(filename, file, { upsert: true });
-      if (!error) {
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('upload timeout')), 6000)
+      );
+
+      try {
+        const { error } = await Promise.race([uploadPromise, timeoutPromise]);
+        if (error) throw error;
         const { data: urlData } = supabase.storage.from('password-icons').getPublicUrl(filename);
         setForm(f => ({ ...f, image_url: urlData.publicUrl }));
-      } else {
-        const r2 = new FileReader();
-        r2.onloadend = () => setForm(f => ({ ...f, image_url: r2.result }));
-        r2.readAsDataURL(file);
+      } catch (uploadErr) {
+        console.warn('Storage upload falló, usando base64 embebido:', uploadErr?.message);
+        setForm(f => ({ ...f, image_url: dataUrl }));
       }
+    } catch (err) {
+      console.error('No se pudo procesar la imagen:', err);
+      alert('No se pudo procesar la imagen. Intenta con otra.');
     } finally {
       setUploadingImage(false);
     }
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
     if (uploadingImage || loading) return;
-    setLoading(true);
-    try {
-      const payload = { ...form, user_id: userId };
-      let saved;
-      if (group) {
-        const { data, error } = await supabase
-          .from('groups').update(payload).eq('id', group.id)
-          .select().single();
-        if (error) throw error;
-        saved = data;
-      } else {
-        const { data, error } = await supabase
-          .from('groups').insert([payload])
-          .select().single();
-        if (error) throw error;
-        saved = data;
-      }
-      onSuccess(saved);
-      onClose();
-    } catch (err) {
-      console.error('Error guardando grupo:', err);
-      alert('No se pudo guardar el grupo: ' + (err.message || 'error desconocido'));
-    } finally {
-      setLoading(false);
+
+    const isNew = !group;
+    const id = isNew ? (crypto?.randomUUID?.() ?? `tmp-${Date.now()}-${Math.random()}`) : group.id;
+    const now = new Date().toISOString();
+
+    const optimistic = {
+      ...form, id, user_id: userId,
+      created_at: isNew ? now : (group.created_at || now),
+      updated_at: now,
+    };
+
+    onSuccess(optimistic);
+    onClose();
+
+    if (isNew) {
+      enqueue({ table: 'groups', type: 'insert', payload: { ...form, id, user_id: userId } });
+    } else {
+      enqueue({ table: 'groups', type: 'update', payload: { ...form }, match: { id: group.id } });
     }
   };
 
-  const handleDelete = async () => {
+  const handleDelete = () => {
     if (!group) return;
     if (!confirm(`¿Eliminar el grupo "${group.name}"? Las categorías dentro se eliminarán, los accesos quedarán sin grupo asignado.`)) return;
-    setLoading(true);
-    const { error } = await supabase.from('groups').delete().eq('id', group.id);
-    setLoading(false);
-    if (error) {
-      console.error('Error eliminando grupo:', error);
-      return alert('No se pudo eliminar: ' + error.message);
-    }
     onSuccess({ __deleted: true, id: group.id });
     onClose();
+    enqueue({ table: 'groups', type: 'delete', match: { id: group.id } });
   };
 
   return (

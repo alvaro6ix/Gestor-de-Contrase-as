@@ -10,7 +10,9 @@ import {
   UserCog, Globe, FolderOpen, Inbox, CheckSquare, Square, Move, CheckCheck
 } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
+import { enqueue } from '../lib/syncQueue';
 import { buildShareMessage } from '../lib/shareMessage';
+import PendingSyncBanner from '../components/PendingSyncBanner';
 
 // Lazy-loaded modals — solo se descargan cuando el usuario los abre.
 // Reduce el bundle inicial dramáticamente.
@@ -195,6 +197,29 @@ const Dashboard = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, view === 'shared']);
 
+  // Safety net: si por cualquier motivo (lock atascado, red muerta) el fetch
+  // inicial no termina en 5s, libera la UI mostrando lo que haya en memoria.
+  // Sin esto el spinner se queda para siempre y el usuario tiene que recargar.
+  useEffect(() => {
+    if (!loading) return;
+    const t = setTimeout(() => setLoading(false), 5000);
+    return () => clearTimeout(t);
+  }, [loading]);
+
+  // Refresh suave al volver a la pestaña — si el usuario estuvo inactivo
+  // y el token caducó, esto fuerza un refetch limpio sin necesidad de F5.
+  useEffect(() => {
+    if (!user) return;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        if (view === 'shared') fetchShared({ initial: false });
+        else fetchAll({ silent: false });
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [user, view, fetchAll, fetchShared]);
+
   // ── Helpers ─────────────────────────────────────────────────────────────────
   const pwdToCategoryIds = useMemo(() => {
     const m = {};
@@ -263,16 +288,12 @@ const Dashboard = () => {
   }, [view, activeGroup]);
 
   // ── Actions ─────────────────────────────────────────────────────────────────
-  const handleDelete = async (id) => {
+  const handleDelete = (id) => {
     if (!confirm('¿Eliminar esta clave permanentemente?')) return;
     // Optimistic remove
     setPasswords(prev => prev.filter(p => p.id !== id));
     setPasswordCategories(prev => prev.filter(pc => pc.password_id !== id));
-    const { error } = await supabase.from('passwords').delete().eq('id', id);
-    if (error) {
-      alert('Error al eliminar: ' + error.message);
-      fetchAll({ silent: false }); // resync si falló
-    }
+    enqueue({ table: 'passwords', type: 'delete', match: { id } });
   };
 
   // onSuccess para PasswordModal: actualiza estado local en lugar de refetch full.
@@ -348,12 +369,13 @@ const Dashboard = () => {
     const senderRole = profile?.role || '';
     const text = buildShareMessage(item, { sender, senderRole, channel: 'whatsapp' });
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
-    supabase.from('share_logs').insert({
-      password_id: item.id,
-      method: 'whatsapp',
-      shared_with: 'WhatsApp',
-      user_id: user.id
-    }).then(() => { });
+    enqueue({
+      table: 'share_logs', type: 'insert',
+      payload: {
+        password_id: item.id, method: 'whatsapp',
+        shared_with: 'WhatsApp', user_id: user.id,
+      },
+    });
   };
 
   const selectView = (v) => {
@@ -539,6 +561,9 @@ const Dashboard = () => {
 
       {/* Main */}
       <main className="main-content">
+        {/* Banner de cambios sin sincronizar (sólo aparece si hay cola) */}
+        <PendingSyncBanner />
+
         {/* Top bar */}
         <div className="top-bar">
           <div style={{ minWidth: 0, flex: 1 }}>
@@ -890,6 +915,9 @@ const Dashboard = () => {
                 onClose={() => setShowModal(false)}
                 onSuccess={handlePasswordSaved}
                 userId={user.id}
+                groups={groups}
+                categories={categories}
+                existingCategoryIds={selectedItem ? (pwdToCategoryIds[selectedItem.id] || []) : []}
                 defaultGroupId={!selectedItem && view !== 'all' && view !== 'shared' && view !== 'unclassified' ? view : null}
                 defaultCategoryId={!selectedItem && activeCategoryIds.length === 1 ? activeCategoryIds[0] : null}
               />

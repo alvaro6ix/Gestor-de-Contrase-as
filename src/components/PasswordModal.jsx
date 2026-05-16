@@ -1,29 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, Eye, EyeOff, Shield, RefreshCw, Camera, Link, Upload, Loader, Folder, Tag, Globe } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
+import { enqueueMany } from '../lib/syncQueue';
 
-const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null, defaultCategoryId = null }) => {
+const PasswordModal = ({
+  item, onClose, onSuccess, userId,
+  defaultGroupId = null, defaultCategoryId = null,
+  groups = [], categories = [], existingCategoryIds = [],
+}) => {
   const [loading, setLoading] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [imageMode, setImageMode] = useState('url');
   const [imagePreview, setImagePreview] = useState('');
-  const [groups, setGroups] = useState([]);
-  const [categories, setCategories] = useState([]);
-  const [selectedCategoryIds, setSelectedCategoryIds] = useState([]);
+  const [selectedCategoryIds, setSelectedCategoryIds] = useState(
+    item ? existingCategoryIds : (defaultCategoryId ? [defaultCategoryId] : [])
+  );
   const [formData, setFormData] = useState({
     title: '', description: '', email: '', password: '', image_url: '', url: '', group_id: defaultGroupId || ''
   });
-
-  // Load groups + categories
-  useEffect(() => {
-    (async () => {
-      const { data: gs } = await supabase.from('groups').select('*').eq('user_id', userId).order('name');
-      setGroups(gs || []);
-      const { data: cs } = await supabase.from('categories').select('*').eq('user_id', userId).order('name');
-      setCategories(cs || []);
-    })();
-  }, [userId]);
 
   // Load existing item data
   useEffect(() => {
@@ -38,15 +33,8 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
         group_id: item.group_id || ''
       });
       setImagePreview(item.image_url || '');
-      // Load existing category links
-      (async () => {
-        const { data } = await supabase.from('password_categories').select('category_id').eq('password_id', item.id);
-        setSelectedCategoryIds((data || []).map(r => r.category_id));
-      })();
-    } else if (defaultCategoryId) {
-      setSelectedCategoryIds([defaultCategoryId]);
     }
-  }, [item, defaultCategoryId]);
+  }, [item]);
 
   // When group changes, drop categories from other groups
   useEffect(() => {
@@ -69,40 +57,47 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
 
   const handleImageFile = async (file) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => setImagePreview(reader.result);
-    reader.readAsDataURL(file);
     setUploadingImage(true);
+
+    // Helper: convertir File a data URL base64 (siempre funciona, no requiere red)
+    const toDataUrl = (f) => new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onloadend = () => resolve(r.result);
+      r.onerror = reject;
+      r.readAsDataURL(f);
+    });
+
     try {
+      // Preview inmediato sin esperar nada
+      const dataUrl = await toDataUrl(file);
+      setImagePreview(dataUrl);
+
+      // Intento de subida a Storage CON TIMEOUT — si tarda más de 6s
+      // (lock atascado, red lenta), abandonamos y guardamos como base64
+      // dentro del propio registro. La imagen igual queda funcional.
       const ext = file.name.split('.').pop() || 'jpg';
       const filename = `${userId}/${Date.now()}.${ext}`;
-      const { error } = await supabase.storage
+      const uploadPromise = supabase.storage
         .from('password-icons')
         .upload(filename, file, { upsert: true });
-      if (!error) {
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('upload timeout')), 6000)
+      );
+
+      try {
+        const { error } = await Promise.race([uploadPromise, timeoutPromise]);
+        if (error) throw error;
         const { data: urlData } = supabase.storage.from('password-icons').getPublicUrl(filename);
         setFormData(f => ({ ...f, image_url: urlData.publicUrl }));
-      } else {
-        // Fallback: store as base64 data URL (await readAsDataURL via Promise wrapper)
-        const dataUrl = await new Promise((resolve, reject) => {
-          const r = new FileReader();
-          r.onloadend = () => resolve(r.result);
-          r.onerror = reject;
-          r.readAsDataURL(file);
-        });
+      } catch (uploadErr) {
+        // Storage no disponible → guardamos la imagen embebida en el registro.
+        // La columna image_url soporta URLs largas, así que un base64 cabe.
+        console.warn('Storage upload falló, usando base64 embebido:', uploadErr?.message);
         setFormData(f => ({ ...f, image_url: dataUrl }));
       }
-    } catch {
-      // Last-resort fallback
-      try {
-        const dataUrl = await new Promise((resolve, reject) => {
-          const r = new FileReader();
-          r.onloadend = () => resolve(r.result);
-          r.onerror = reject;
-          r.readAsDataURL(file);
-        });
-        setFormData(f => ({ ...f, image_url: dataUrl }));
-      } catch { /* give up */ }
+    } catch (err) {
+      console.error('No se pudo procesar la imagen:', err);
+      alert('No se pudo procesar la imagen. Intenta con otra.');
     } finally {
       setUploadingImage(false);
     }
@@ -146,46 +141,35 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
     onSuccess(optimisticItem, catIds);
     onClose();
 
-    // 2. Persiste en Supabase en background. Errores se reportan vía alert.
-    (async () => {
-      try {
-        if (isNew) {
-          const insertRow = { ...dataFields, id, user_id: userId };
-          const { error } = await supabase.from('passwords').insert([insertRow]);
-          if (error) throw error;
-          if (catIds.length) {
-            const rows = catIds.map(cid => ({ password_id: id, category_id: cid, user_id: userId }));
-            const { error: pcErr } = await supabase.from('password_categories').insert(rows);
-            if (pcErr) throw pcErr;
-          }
-        } else {
-          const updateRow = { ...dataFields, updated_at: now };
-          const ops = [supabase.from('passwords').update(updateRow).eq('id', id)];
-          if (formData.password !== item.password) {
-            ops.push(supabase.from('password_history').insert({
-              password_id: id, old_password: item.password, new_password: formData.password,
-            }));
-          }
-          const results = await Promise.all(ops);
-          const failed = results.find(r => r?.error);
-          if (failed) throw failed.error;
-          const { error: delErr } = await supabase.from('password_categories').delete().eq('password_id', id);
-          if (delErr) throw delErr;
-          if (catIds.length) {
-            const rows = catIds.map(cid => ({ password_id: id, category_id: cid, user_id: userId }));
-            const { error: pcErr } = await supabase.from('password_categories').insert(rows);
-            if (pcErr) throw pcErr;
-          }
-        }
-      } catch (err) {
-        console.error('PasswordModal background save failed:', err);
-        alert(
-          'No se pudo guardar en el servidor:\n' +
-          (err?.message || err?.error_description || 'Error desconocido') +
-          '\n\nRecarga la página para ver el estado real.'
-        );
+    // 2. Encolar la persistencia. La cola se encarga de reintentos, retries
+    //    automáticos en background, y de NO perder nada si la red falla
+    //    (los pendientes quedan en localStorage hasta que el server confirme).
+    const ops = [];
+    if (isNew) {
+      ops.push({ table: 'passwords', type: 'insert', payload: { ...dataFields, id, user_id: userId } });
+      catIds.forEach(cid => ops.push({
+        table: 'password_categories', type: 'insert',
+        payload: { password_id: id, category_id: cid, user_id: userId }
+      }));
+    } else {
+      ops.push({
+        table: 'passwords', type: 'update',
+        payload: { ...dataFields, updated_at: now }, match: { id }
+      });
+      if (formData.password !== item.password) {
+        ops.push({
+          table: 'password_history', type: 'insert',
+          payload: { password_id: id, old_password: item.password, new_password: formData.password }
+        });
       }
-    })();
+      // Replace categorías: borrar todas y reinsertar las seleccionadas
+      ops.push({ table: 'password_categories', type: 'delete', match: { password_id: id } });
+      catIds.forEach(cid => ops.push({
+        table: 'password_categories', type: 'insert',
+        payload: { password_id: id, category_id: cid, user_id: userId }
+      }));
+    }
+    enqueueMany(ops);
   };
 
   const availableCategories = formData.group_id
@@ -349,7 +333,11 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
           <div className="input-group">
             <label className="input-label">Usuario / Email</label>
+            {/* name aleatorio + autoComplete=off + readOnly→onFocus evita que
+                el navegador rellene con la cuenta del propio gestor */}
             <input type="text" required className="input-field" style={{ paddingLeft: '1rem' }}
+              name="svc-user" autoComplete="off" autoCorrect="off" spellCheck="false"
+              data-lpignore="true" data-1p-ignore="true" data-form-type="other"
               value={formData.email} onChange={(e) => setFormData(f => ({ ...f, email: e.target.value }))} />
           </div>
           <div className="input-group">
@@ -357,6 +345,8 @@ const PasswordModal = ({ item, onClose, onSuccess, userId, defaultGroupId = null
             <div className="input-wrapper">
               <input type={showPassword ? 'text' : 'password'} required className="input-field"
                 style={{ paddingLeft: '1rem', paddingRight: '4.5rem' }}
+                name="svc-pass" autoComplete="new-password" autoCorrect="off" spellCheck="false"
+                data-lpignore="true" data-1p-ignore="true" data-form-type="other"
                 value={formData.password} onChange={(e) => setFormData(f => ({ ...f, password: e.target.value }))} />
               <div style={{ position: 'absolute', right: '0.25rem', display: 'flex', gap: '0' }}>
                 <button type="button" onClick={generatePassword} className="btn-icon" title="Generar" style={{ padding: '0.3rem' }}>

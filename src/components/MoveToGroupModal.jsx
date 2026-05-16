@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { X, Move, Folder, Tag, Save } from 'lucide-react';
-import { supabase } from '../lib/supabaseClient';
+import { enqueueMany } from '../lib/syncQueue';
 
 const MoveToGroupModal = ({ itemIds, groups, categories, onClose, onSuccess, userId }) => {
   const [groupId, setGroupId] = useState('');
@@ -20,47 +20,40 @@ const MoveToGroupModal = ({ itemIds, groups, categories, onClose, onSuccess, use
     setCategoryIds(prev => prev.includes(cid) ? prev.filter(x => x !== cid) : [...prev, cid]);
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
-    setLoading(true);
-    try {
-      // 1. Actualiza el group_id de todos los accesos seleccionados
-      const { error: updErr } = await supabase
-        .from('passwords')
-        .update({ group_id: groupId || null, updated_at: new Date().toISOString() })
-        .in('id', itemIds);
-      if (updErr) throw updErr;
+    if (loading) return;
 
-      // 2. Sincroniza las relaciones con categorías
-      if (!groupId) {
-        // Sin grupo → eliminar todos los vínculos de categorías
-        await supabase.from('password_categories').delete().in('password_id', itemIds);
-      } else {
-        if (!keepExisting) {
-          // Limpiar vínculos previos (de cualquier grupo) antes de añadir los nuevos
-          await supabase.from('password_categories').delete().in('password_id', itemIds);
-        }
-        if (categoryIds.length > 0) {
-          const rows = [];
-          for (const pid of itemIds) {
-            for (const cid of categoryIds) {
-              rows.push({ password_id: pid, category_id: cid, user_id: userId });
-            }
-          }
-          const { error: pcErr } = await supabase
-            .from('password_categories')
-            .upsert(rows, { onConflict: 'password_id,category_id', ignoreDuplicates: true });
-          if (pcErr) throw pcErr;
+    const ops = [];
+    // 1. Actualiza el group_id de todos los accesos seleccionados
+    ops.push({
+      table: 'passwords', type: 'update',
+      payload: { group_id: groupId || null, updated_at: new Date().toISOString() },
+      match: { id: { in: itemIds } },
+    });
+    // 2. Sincroniza las relaciones con categorías
+    if (!groupId || !keepExisting) {
+      ops.push({
+        table: 'password_categories', type: 'delete',
+        match: { password_id: { in: itemIds } },
+      });
+    }
+    if (groupId && categoryIds.length > 0) {
+      const rows = [];
+      for (const pid of itemIds) {
+        for (const cid of categoryIds) {
+          rows.push({ password_id: pid, category_id: cid, user_id: userId });
         }
       }
-
-      onSuccess();
-      onClose();
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setLoading(false);
+      ops.push({
+        table: 'password_categories', type: 'upsert',
+        payload: rows,
+        options: { onConflict: 'password_id,category_id', ignoreDuplicates: true },
+      });
     }
+    enqueueMany(ops);
+    onSuccess();
+    onClose();
   };
 
   return (

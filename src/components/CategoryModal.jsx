@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, Tag, Trash2 } from 'lucide-react';
-import { supabase } from '../lib/supabaseClient';
+import { enqueue } from '../lib/syncQueue';
 
 const COLORS = ['#ffd300', '#00bcd4', '#7c4dff', '#ff5722', '#4caf50', '#e91e63', '#3f51b5', '#ff9800'];
 
@@ -18,52 +18,40 @@ const CategoryModal = ({ category, groupId, groupName, onClose, onSuccess, userI
     }
   }, [category]);
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
     if (loading) return;
     if (!groupId) {
       alert('Falta el grupo de destino. Cierra y vuelve a abrir el formulario.');
       return;
     }
-    setLoading(true);
-    try {
-      const payload = { ...form, group_id: groupId, user_id: userId };
-      let saved;
-      if (category) {
-        const { data, error } = await supabase
-          .from('categories').update(payload).eq('id', category.id)
-          .select().single();
-        if (error) throw error;
-        saved = data;
-      } else {
-        const { data, error } = await supabase
-          .from('categories').insert([payload])
-          .select().single();
-        if (error) throw error;
-        saved = data;
-      }
-      onSuccess(saved);
-      onClose();
-    } catch (err) {
-      console.error('Error guardando categoría:', err);
-      alert('No se pudo guardar la categoría: ' + (err.message || 'error desconocido'));
-    } finally {
-      setLoading(false);
+
+    const isNew = !category;
+    const id = isNew ? (crypto?.randomUUID?.() ?? `tmp-${Date.now()}-${Math.random()}`) : category.id;
+    const now = new Date().toISOString();
+
+    const optimistic = {
+      ...form, id, group_id: groupId, user_id: userId,
+      created_at: isNew ? now : (category.created_at || now),
+      updated_at: now,
+    };
+
+    onSuccess(optimistic);
+    onClose();
+
+    if (isNew) {
+      enqueue({ table: 'categories', type: 'insert', payload: { ...form, id, group_id: groupId, user_id: userId } });
+    } else {
+      enqueue({ table: 'categories', type: 'update', payload: { ...form, group_id: groupId }, match: { id: category.id } });
     }
   };
 
-  const handleDelete = async () => {
+  const handleDelete = () => {
     if (!category) return;
     if (!confirm(`¿Eliminar la categoría "${category.name}"? Los accesos quedarán sin esta categoría asignada.`)) return;
-    setLoading(true);
-    const { error } = await supabase.from('categories').delete().eq('id', category.id);
-    setLoading(false);
-    if (error) {
-      console.error('Error eliminando categoría:', error);
-      return alert('No se pudo eliminar: ' + error.message);
-    }
     onSuccess({ __deleted: true, id: category.id });
     onClose();
+    enqueue({ table: 'categories', type: 'delete', match: { id: category.id } });
   };
 
   return (

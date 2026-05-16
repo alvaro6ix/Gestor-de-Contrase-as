@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, UserCog } from 'lucide-react';
-import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
+import { enqueue } from '../lib/syncQueue';
 
 const COLORS = ['#ffd300', '#00bcd4', '#7c4dff', '#ff5722', '#4caf50', '#e91e63', '#3f51b5', '#ff9800'];
 
@@ -16,7 +16,7 @@ const ROLE_SUGGESTIONS = [
 ];
 
 const ProfileModal = ({ onClose }) => {
-  const { user, profile, refreshProfile } = useAuth();
+  const { user, profile, setProfile } = useAuth();
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState({
     display_name: '', role: '', role_color: '#ffd300'
@@ -32,24 +32,20 @@ const ProfileModal = ({ onClose }) => {
     }
   }, [profile]);
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
-    setLoading(true);
-    try {
-      const payload = { ...form, user_id: user.id };
-      if (profile) {
-        const { error } = await supabase.from('profiles').update(payload).eq('user_id', user.id);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from('profiles').insert([payload]);
-        if (error) throw error;
-      }
-      await refreshProfile();
-      onClose();
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setLoading(false);
+    if (loading) return;
+
+    const payload = { ...form, user_id: user.id };
+    // Optimistic: actualiza el AuthContext de inmediato para que sidebar/badge
+    // muestren el nuevo nombre y rol al instante.
+    setProfile(prev => ({ ...(prev || {}), ...payload }));
+    onClose();
+
+    if (profile) {
+      enqueue({ table: 'profiles', type: 'update', payload, match: { user_id: user.id } });
+    } else {
+      enqueue({ table: 'profiles', type: 'insert', payload });
     }
   };
 
