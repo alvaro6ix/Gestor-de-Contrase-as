@@ -370,7 +370,8 @@ const Dashboard = () => {
     const text = buildShareMessage(item, { sender, senderRole, channel: 'whatsapp' });
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
     enqueue({
-      table: 'share_logs', type: 'insert',
+      // log de compartido = no crítico, no bloquea la cola si falla
+      table: 'share_logs', type: 'insert', critical: false,
       payload: {
         password_id: item.id, method: 'whatsapp',
         shared_with: 'WhatsApp', user_id: user.id,

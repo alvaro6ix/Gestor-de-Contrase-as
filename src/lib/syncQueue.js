@@ -164,6 +164,19 @@ export const process = async () => {
         cur[idx].attempts = (cur[idx].attempts || 0) + 1;
         cur[idx].lastError = err?.message || String(err);
         if (cur[idx].attempts >= MAX_AUTO_ATTEMPTS) {
+          // Operaciones no críticas (logs, historial) se descartan al
+          // agotar reintentos en vez de bloquear toda la cola con un
+          // estado 'failed'. La data principal sigue viva.
+          // Las tablas password_history y share_logs son SIEMPRE no
+          // críticas, aunque no traigan el flag (compatibilidad con ops
+          // viejas guardadas antes de este cambio).
+          const NON_CRITICAL_TABLES = ['password_history', 'share_logs'];
+          const isNonCritical = cur[idx].critical === false || NON_CRITICAL_TABLES.includes(cur[idx].table);
+          if (isNonCritical) {
+            console.warn('Descartada op no-crítica tras 3 fallos:', cur[idx]);
+            safeWrite(cur.filter(o => o.id !== head.id));
+            continue;
+          }
           cur[idx].status = 'failed';
           safeWrite(cur);
           break;

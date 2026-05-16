@@ -157,8 +157,10 @@ const PasswordModal = ({
         payload: { ...dataFields, updated_at: now }, match: { id }
       });
       if (formData.password !== item.password) {
+        // Historial = nice-to-have, no crítico. Si falla 3 veces se descarta
+        // sola (la contraseña actual ya está guardada en `passwords`).
         ops.push({
-          table: 'password_history', type: 'insert',
+          table: 'password_history', type: 'insert', critical: false,
           payload: { password_id: id, old_password: item.password, new_password: formData.password }
         });
       }
