@@ -40,11 +40,13 @@ export function buildShareMessage(item, opts = {}) {
   lines.push(`${bold('Usuario:')} ${item.email}`);
   lines.push(`${bold('Clave:')} ${item.password}`);
 
-  // Firma
-  lines.push('');
-  const senderLabel = sender || 'el equipo';
-  const roleSuffix = senderRole ? ` — ${senderRole}` : '';
-  lines.push(italic(`Enviado por ${senderLabel}${roleSuffix}`));
+  // Firma — solo si hay un nombre real configurado en el perfil.
+  // Si no hay, mejor omitir la firma que mostrar un email o "el equipo".
+  if (sender && sender.trim()) {
+    lines.push('');
+    const roleSuffix = senderRole ? ` — ${senderRole}` : '';
+    lines.push(italic(`Enviado por ${sender.trim()}${roleSuffix}`));
+  }
 
   // Truco anti-preview: terminar con punto evita que WhatsApp tome el link
   // de arriba como "URL principal" y genere el preview de tarjeta. Si igual

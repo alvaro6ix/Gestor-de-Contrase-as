@@ -365,7 +365,9 @@ const Dashboard = () => {
   };
 
   const shareWhatsApp = (item) => {
-    const sender = profile?.display_name || user?.email || '';
+    // Solo display_name, NUNCA el email — queda feo en el mensaje y expone
+    // el correo del remitente. Si no hay display_name, la firma se omite.
+    const sender = profile?.display_name || '';
     const senderRole = profile?.role || '';
     const text = buildShareMessage(item, { sender, senderRole, channel: 'whatsapp' });
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
