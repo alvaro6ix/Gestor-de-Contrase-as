@@ -10,9 +10,18 @@ import {
   UserCog, Globe, FolderOpen, Inbox, CheckSquare, Square, Move, CheckCheck
 } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
-import { enqueue } from '../lib/syncQueue';
+import { enqueue, getQueue, subscribe as subscribeQueue } from '../lib/syncQueue';
 import { buildShareMessage } from '../lib/shareMessage';
 import PendingSyncBanner from '../components/PendingSyncBanner';
+
+// Si hay ops pendientes para alguna de estas tablas, NO sobreescribir el
+// state local con el resultado de fetchAll — la cola aún no ha aplicado
+// nuestros cambios al servidor y el fetch traería estado inconsistente
+// (ej. DELETE pasó pero INSERT está encolado → categoría desaparece).
+const hasPendingOpsFor = (...tables) => {
+  const q = getQueue();
+  return q.some(o => o.status === 'pending' && tables.includes(o.table));
+};
 
 // Lazy-loaded modals — solo se descargan cuando el usuario los abre.
 // Reduce el bundle inicial dramáticamente.
@@ -143,10 +152,13 @@ const Dashboard = () => {
       ]);
       // Solo aplicar si seguimos siendo el fetch más reciente
       if (myToken !== fetchToken.current) return;
-      setPasswords(pRes.data || []);
-      setGroups(gRes.data || []);
-      setCategories(cRes.data || []);
-      setPasswordCategories(pcRes.data || []);
+      // Para cada tabla: solo sobreescribir si NO hay ops pendientes en
+      // la cola. Si las hay, conservamos el estado optimista hasta que
+      // la cola termine y dispare un refetch limpio.
+      if (!hasPendingOpsFor('passwords')) setPasswords(pRes.data || []);
+      if (!hasPendingOpsFor('groups')) setGroups(gRes.data || []);
+      if (!hasPendingOpsFor('categories')) setCategories(cRes.data || []);
+      if (!hasPendingOpsFor('password_categories')) setPasswordCategories(pcRes.data || []);
     } catch (err) {
       console.error('fetchAll error:', err);
     } finally {
@@ -218,6 +230,23 @@ const Dashboard = () => {
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [user, view, fetchAll, fetchShared]);
+
+  // Cuando la cola termina de drenarse (el último pendiente se ejecuta),
+  // refetch silenciosamente para reemplazar el estado optimista por el
+  // canónico del servidor. Sin esto, las categorías pendientes pueden
+  // quedar "atrapadas" en estado optimista hasta el próximo refresh.
+  useEffect(() => {
+    if (!user) return;
+    let prevPending = 0;
+    return subscribeQueue((q) => {
+      const pendingNow = q.filter(o => o.status === 'pending').length;
+      if (prevPending > 0 && pendingNow === 0) {
+        if (view === 'shared') fetchShared({ initial: false });
+        else fetchAll({ silent: false });
+      }
+      prevPending = pendingNow;
+    });
   }, [user, view, fetchAll, fetchShared]);
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
